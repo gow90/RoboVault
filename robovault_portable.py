@@ -50,6 +50,8 @@ CONFIG_FILE = "robovault_config.json"
 DEFAULT_BACKUP_ROOT = str(Path.home() / "RoboVault_Backups")
 FTP_BUFFER_SIZE = 65536
 TIMESTAMP_FMT = "%Y-%m-%d_%H-%M-%S"
+DEFAULT_CONTROLLER = "R-30iB Plus"
+UI_FONT = "Segoe UI"
 
 FILE_CATEGORIES = {
     "TP Programs":      [".tp"],
@@ -89,7 +91,11 @@ class SecureCredentialStore:
     CRYPTPROTECT_UI_FORBIDDEN = 0x1
     CRYPTPROTECT_LOCAL_MACHINE = 0x4  # NOT USED — we want per-user binding
 
-    class _DATA_BLOB(ctypes.Structure):
+    # Envelope prefixes marking how a stored secret was encoded.
+    DPAPI_PREFIX = "dpapi:"
+    B64_PREFIX = "b64:"
+
+    class _DataBlob(ctypes.Structure):
         _fields_ = [("cbData", ctypes.wintypes.DWORD),
                     ("pbData", ctypes.POINTER(ctypes.c_char))]
 
@@ -99,10 +105,10 @@ class SecureCredentialStore:
 
     @classmethod
     def _dpapi_protect(cls, plaintext: bytes) -> bytes:
-        blob_in = cls._DATA_BLOB(len(plaintext),
+        blob_in = cls._DataBlob(len(plaintext),
                                   ctypes.cast(ctypes.c_char_p(plaintext),
                                               ctypes.POINTER(ctypes.c_char)))
-        blob_out = cls._DATA_BLOB()
+        blob_out = cls._DataBlob()
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
         if not crypt32.CryptProtectData(
@@ -116,10 +122,10 @@ class SecureCredentialStore:
 
     @classmethod
     def _dpapi_unprotect(cls, ciphertext: bytes) -> bytes:
-        blob_in = cls._DATA_BLOB(len(ciphertext),
+        blob_in = cls._DataBlob(len(ciphertext),
                                   ctypes.cast(ctypes.c_char_p(ciphertext),
                                               ctypes.POINTER(ctypes.c_char)))
-        blob_out = cls._DATA_BLOB()
+        blob_out = cls._DataBlob()
         crypt32 = ctypes.windll.crypt32
         kernel32 = ctypes.windll.kernel32
         if not crypt32.CryptUnprotectData(
@@ -140,14 +146,14 @@ class SecureCredentialStore:
         if cls._is_windows():
             try:
                 cipher = cls._dpapi_protect(data)
-                return "dpapi:" + base64.b64encode(cipher).decode("ascii")
+                return cls.DPAPI_PREFIX + base64.b64encode(cipher).decode("ascii")
             except Exception:
                 pass  # fall through to obfuscation
         if not cls._WARN_SHOWN:
             sys.stderr.write("WARNING: DPAPI unavailable; using weak obfuscation. "
                              "Do not deploy non-Windows builds in production.\n")
             cls._WARN_SHOWN = True
-        return "b64:" + base64.b64encode(data).decode("ascii")
+        return cls.B64_PREFIX + base64.b64encode(data).decode("ascii")
 
     @classmethod
     def decrypt(cls, stored: str) -> str:
@@ -155,13 +161,13 @@ class SecureCredentialStore:
         if not stored:
             return ""
         try:
-            if stored.startswith("dpapi:"):
+            if stored.startswith(cls.DPAPI_PREFIX):
                 if not cls._is_windows():
                     return ""  # cannot decrypt cross-platform
-                cipher = base64.b64decode(stored[len("dpapi:"):])
+                cipher = base64.b64decode(stored[len(cls.DPAPI_PREFIX):])
                 return cls._dpapi_unprotect(cipher).decode("utf-8")
-            if stored.startswith("b64:"):
-                return base64.b64decode(stored[len("b64:"):]).decode("utf-8")
+            if stored.startswith(cls.B64_PREFIX):
+                return base64.b64decode(stored[len(cls.B64_PREFIX):]).decode("utf-8")
             # Legacy plaintext (migrated once on first load)
             return stored
         except Exception:
@@ -221,7 +227,7 @@ class Robot:
     """A robot's config. `ftp_pass` in memory is plaintext; it is encrypted
     only when serialized to disk via Project.to_dict_for_storage()."""
 
-    def __init__(self, name="", ip="", identifier="", controller="R-30iB Plus",
+    def __init__(self, name="", ip="", identifier="", controller=DEFAULT_CONTROLLER,
                  ftp_user="", ftp_pass="", ftp_port=21, notes=""):
         self.name = name
         self.ip = ip
@@ -1297,7 +1303,7 @@ class RoboVaultApp:
                 return
 
         self.backup_running = True
-        active_pis = set(pi for pi, _, _ in robots)
+        active_pis = {pi for pi, _, _ in robots}
         self._active_projects.update(active_pis)
         self.btn_start.config(state=tk.DISABLED)
         self.btn_cancel.config(state=tk.NORMAL)
@@ -1407,7 +1413,11 @@ class RoboVaultApp:
         self.lbl_status.config(text="Backup complete")
 
     def _update_progress(self, current, total, filename):
-        pass
+        # Intentionally a no-op: BackupEngine emits per-file progress through
+        # this callback, but the parallel backup flow aggregates progress at
+        # the per-robot level in _start_backup.run().backup_one() instead,
+        # so the engine-level progress events are ignored here.
+        return
 
     def _log(self, msg):
         def _a():
@@ -1495,7 +1505,7 @@ class RoboVaultApp:
         f = ttk.Frame(win, padding=15)
         f.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(f, text=f"Project: {proj.name}", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(f, text=f"Project: {proj.name}", font=(UI_FONT, 10, "bold")).pack(anchor=tk.W)
         ttk.Label(f, text="").pack()
 
         enabled_var = tk.BooleanVar(value=proj.sched_enabled)
@@ -1812,7 +1822,7 @@ class RoboVaultApp:
 
         ttk.Label(f, text="Microsoft Teams Workflow Webhook URL (https only):").pack(anchor=tk.W)
         ttk.Label(f, text="(Channel > ... > Workflows > 'Post to a channel when a webhook request is received')",
-                  foreground="gray", font=("Segoe UI", 9), wraplength=480).pack(anchor=tk.W)
+                  foreground="gray", font=(UI_FONT, 9), wraplength=480).pack(anchor=tk.W)
         url_var = tk.StringVar(value=self.settings.get("teams_webhook_url", ""))
         ttk.Entry(f, textvariable=url_var, width=65).pack(fill=tk.X, pady=(4, 10))
 
@@ -1823,7 +1833,7 @@ class RoboVaultApp:
         ttk.Checkbutton(f, text="Notify on backup success", variable=success_var).pack(anchor=tk.W)
 
         ttk.Label(f, text="URL is stored encrypted (DPAPI) and validated as https.",
-                  foreground="gray", font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(6, 0))
+                  foreground="gray", font=(UI_FONT, 9)).pack(anchor=tk.W, pady=(6, 0))
 
         status_lbl = ttk.Label(f, text="", foreground="gray")
         status_lbl.pack(anchor=tk.W, pady=(4, 0))
@@ -2008,7 +2018,7 @@ class RoboVaultApp:
         f = ttk.Frame(about, padding=20)
         f.pack(fill=tk.BOTH, expand=True)
         ttk.Label(f, text=f"{APP_NAME} v{APP_VERSION}",
-                  font=("Segoe UI", 14, "bold")).pack()
+                  font=(UI_FONT, 14, "bold")).pack()
         ttk.Label(f, text="FANUC Robot Backup Tool", foreground="gray").pack(pady=(2, 10))
         ttk.Label(f, text=f"Author: {APP_AUTHOR}").pack()
         ttk.Label(f, text=APP_COMPANY, foreground="gray").pack()
@@ -2060,7 +2070,7 @@ class RobotDialog:
             e.grid(row=i, column=1, sticky=tk.EW, pady=3, padx=(8, 0))
             self.entries[key] = e
         ttk.Label(f, text="Controller:").grid(row=3, column=0, sticky=tk.W, pady=3)
-        self.ctrl_var = tk.StringVar(value="R-30iB Plus")
+        self.ctrl_var = tk.StringVar(value=DEFAULT_CONTROLLER)
         ttk.Combobox(f, textvariable=self.ctrl_var, values=self.CONTROLLERS,
                       state="readonly", width=25).grid(row=3, column=1, sticky=tk.EW, pady=3, padx=(8, 0))
         ttk.Label(f, text="FTP User:").grid(row=4, column=0, sticky=tk.W, pady=3)
@@ -2073,7 +2083,7 @@ class RobotDialog:
                   foreground="gray").grid(
             row=6, column=1, sticky=tk.W, padx=(8, 0))
         ttk.Label(f, text="Notes:").grid(row=7, column=0, sticky=tk.NW, pady=3)
-        self.notes = tk.Text(f, height=2, width=28, font=("Segoe UI", 9))
+        self.notes = tk.Text(f, height=2, width=28, font=(UI_FONT, 9))
         self.notes.grid(row=7, column=1, sticky=tk.EW, pady=3, padx=(8, 0))
         if robot:
             self.entries["name"].insert(0, robot.name)
