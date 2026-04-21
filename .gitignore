@@ -1,0 +1,10 @@
+﻿__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+robovault_config.json
+robovault_config.secrets
+RoboVault_Backups/
+.vscode/
+.idea/
